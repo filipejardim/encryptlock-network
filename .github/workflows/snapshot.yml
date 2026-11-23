@@ -1,46 +1,64 @@
-# Every 10 minutes: a snapshot of the EncryptLock network's public data
-# (snapshot.mjs) published on GitHub Pages for outside tools.
+# The EncryptLock network's public data (snapshot.mjs) on GitHub Pages for
+# outside tools, refreshed every 7 minutes. GitHub's schedule can start late
+# or not at all, so it is not relied on: each run keeps refreshing for about
+# 5.5 hours and then starts the next run itself (a workflow_dispatch by the
+# run's own token is allowed). The schedule is only a backup; the
+# concurrency group keeps at most one run going and one waiting.
 name: Network snapshot
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 concurrency:
   group: snapshot
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
+  actions: write
 
 jobs:
   snapshot:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
-    environment:
-      name: github-pages
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Read the network
-        run: node snapshot.mjs
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-      - uses: actions/deploy-pages@v4
+      - name: Refresh every 7 minutes for about 5.5 hours
+        env:
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898333+github-actions[bot]@users.noreply.github.com"
+          end=$(( $(date +%s) + 330 * 60 ))
+          while [ $(date +%s) -lt $end ]; do
+            start=$(date +%s)
+            rm -rf site
+            if node snapshot.mjs; then
+              # One commit only on gh-pages (no history growing every 7 minutes).
+              ( cd site && git init -q -b gh-pages && git add -A && git commit -qm "Snapshot" \
+                && git push -qf "https://x-access-token:${TOKEN}@github.com/${REPO}.git" gh-pages ) \
+                || echo "publish failed, next try in 7 minutes"
+            fi
+            left=$(( 420 - ( $(date +%s) - start ) ))
+            [ $left -gt 0 ] && sleep $left
+          done
+      - name: Start the next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run snapshot.yml --repo "${{ github.repository }}" --ref main
       # GitHub stops scheduled runs after 60 days without a commit: one empty
-      # commit a month keeps it going without anyone.
-      - name: Keep the schedule alive
+      # commit a month keeps the backup schedule alive.
+      - name: Keep the backup schedule alive
         run: |
           last=$(git log -1 --format=%ct)
           if [ $(( $(date +%s) - last )) -gt $(( 30 * 86400 )) ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898333+github-actions[bot]@users.noreply.github.com"
             git commit --allow-empty -m "Keep the snapshot schedule alive"
             git push
           fi
